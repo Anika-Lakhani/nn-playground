@@ -140,10 +140,14 @@ class BiasedCarsDataset(Dataset):
 
 ## DATA TRANSFORMS
 # Define data transformations (based this part off of the data loader GitHub we were given)
+# To improve my performance after initially running it, I asked Cursor (Claude 3.5 Sonnet) how it would improve the accuracy of the model
+# It suggested to enhance the augmentations
 data_transforms = {
     'train': transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize for ResNet18 (did this instead of a ResizeCrop)
-        transforms.RandomHorizontalFlip(),
+        transforms.Resize((256, 256)),  # Resize for ResNet18 (did this instead of a ResizeCrop)
+        transforms.RandomResizedCrop(224), # then randomly crop to 224x224
+        transforms.RandomHorizontalFlip(), # then flip horizontally
+        transforms.RandomRotation(15), # then rotate randomly by 15 degrees
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  # ImageNet normalization (took the numbers from the GitHub)
     ]),
@@ -160,8 +164,8 @@ train_dataset = BiasedCarsDataset(root_dir, att_dict_path, transform=data_transf
 val_dataset = BiasedCarsDataset(root_dir, att_dict_path, transform=data_transforms['val'], is_train=False)
 
 ## CREATE DATA LOADERS FOR TRAIN AND TEST DATA
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=0)  # Set to 0 for Windows
-val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=0)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0)  # Was originally 32, but tried changing to 16
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
 
 ## SAVE NUMBER OF CLASSES FOUND IN DATASET
 # This will prove useful so that we can reshape our model accordingly
@@ -185,12 +189,12 @@ model = model.to(device) # if we can, move it to the GPU to save time (if it is 
 criterion = nn.CrossEntropyLoss() # same as in assignment 1
 
 # Define optimizer
-optimizer = optim.Adam(model.parameters(), lr=1e-2) # same as in assignment 1, except .Adam; I asked Perplexity what it thought was best
+# optimizer = optim.Adam(model.parameters(), lr=1e-2) # same as in assignment 1, except .Adam; I asked Perplexity what it thought was best
 
 # After I got initial results, I asked Cursor (Claude 3.5 Sonnet) how it would improve the accuracy of the model
 # It suggested a lower learning rate with a scheduler
-# optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-2)
-# scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-2)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=2, verbose=True)
 
 # From Perplexity: "Adam is generally better than SGD, but you can experiment" (note that we used .SGD in Assignment 1)
 
@@ -199,23 +203,34 @@ optimizer = optim.Adam(model.parameters(), lr=1e-2) # same as in assignment 1, e
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=5):
     train_losses, val_losses, val_accuracies = [], [], []
 
+    best_val_acc = 0.0
+
     for epoch in range(num_epochs): # loop over training epochs
         model.train()  # Set model to training mode
         running_loss = 0.0 # counter for loss function
 
         # I wonder why we don't use batches here? I guess because we were told to train on all the data?
 
-        for inputs, labels in train_loader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+        for batch_idx, (inputs, labels) in enumerate(train_loader):
+            inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
+            
+            # After running the initial version, I asked Cursor (Claude 3.5 Sonnet) how it would improve the accuracy of the model
+            # It suggested using gradient clipping to prevent the exploding gradients problem
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # Take a step according to the gradient as usual
             optimizer.step()
 
-            running_loss += loss.item() * inputs.size(0)
+            running_loss += loss.item() * inputs.size(0) # append to our loss counter
+
+            # Printing batch progress
+            if batch_idx % 10 == 0:
+                print(f"Epoch: [{epoch+1}/{num_epochs}], Batch: [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
 
         epoch_loss = running_loss / len(train_loader.dataset)
         train_losses.append(epoch_loss)
@@ -229,13 +244,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
         with torch.no_grad():
             for inputs, labels in val_loader:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+                inputs, labels = inputs.to(device), labels.to(device)
 
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
 
-                val_loss += loss.item() * inputs.size(0)
+                val_loss += loss.item() * inputs.size(0) # append to our loss counter
                 _, preds = torch.max(outputs, 1)
                 corrects += torch.sum(preds == labels.data)
 
@@ -244,16 +258,26 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_epoch_acc = corrects.double() / len(val_loader.dataset)
         val_accuracies.append(val_epoch_acc)
 
+        # Also part of Cursor's suggestion to improve the accuracy of the model upon my asking
+        scheduler.step(val_epoch_loss) # step the learning rate scheduler
+
+        # Save best model so that we don't get worse during a learning step
+        if val_epoch_acc > best_val_acc:
+            best_val_acc = val_epoch_acc
+            torch.save(model.state_dict(), 'best_model.pth')
 
         print(f'Epoch {epoch+1}/{num_epochs} - Train Loss: {epoch_loss:.4f} Val Loss: {val_epoch_loss:.4f} Val Acc: {val_epoch_acc:.4f}')
+        print(f'Current LR: {optimizer.param_groups[0]["lr"]:.6f}')
+        print('-' * 60)
 
+    model.load_state_dict(torch.load('best_model.pth')) # load the best model
     return train_losses, val_losses, val_accuracies
 
 # TRAIN MODEL AND PLOT RESULTS
 num_epochs = 5 # as per the assignment description
 # Call model training function previously defined
 print("Training model...")
-train_losses, val_losses, val_accuracies = train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs)
+train_losses, val_losses, val_accuracies = train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=5)
 
 # Plotting the training and validation loss
 plt.figure(figsize=(12, 4))
