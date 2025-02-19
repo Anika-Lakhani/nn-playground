@@ -29,6 +29,7 @@ from PIL import Image
 import pickle
 import matplotlib.pyplot as plt
 import os
+import collections  # Add this import at the top with other imports
 
 ## DEVICE CONFIGURATION
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -38,8 +39,8 @@ print(f"Using device: {device}")
 # Instead, assume the dataset is already downloaded and extracted to your project directory
 
 ## DEFINE PROJECT DIRECTORY
-# Update this path to your project directory
-project_dir = os.path.dirname(os.path.abspath(__file__))
+# Update paths to match the new location
+project_dir = os.path.join('/Users', 'anikalakhani', 'neurobio240', 'nn-playground')
 root_dir = os.path.join(project_dir, 'biased_cars_1')
 att_dict_path = os.path.join(root_dir, 'att_dict_simplified.p')
 
@@ -158,6 +159,59 @@ data_transforms = {
     ]),
 }
 
+def get_class_distribution(dataset):
+    """Calculate the distribution of classes in a dataset."""
+    class_counts = collections.defaultdict(int)
+    for _, label in dataset.image_list:
+        class_counts[label] += 1
+    return dict(sorted(class_counts.items()))
+
+if __name__ == '__main__':
+    # Move all the training code here
+    train_dataset = BiasedCarsDataset(root_dir, att_dict_path, transform=data_transforms['train'], is_train=True)
+    val_dataset = BiasedCarsDataset(root_dir, att_dict_path, transform=data_transforms['val'], is_train=False)
+    
+    # Get statistics for both sets
+    train_dist = get_class_distribution(train_dataset)
+    val_dist = get_class_distribution(val_dataset)
+
+    # Print training set statistics
+    print("\nTraining Set Statistics:")
+    print("-" * 50)
+    print(f"Total images: {len(train_dataset)}")
+    print("Images per class:")
+    for class_idx, count in train_dist.items():
+        print(f"Class {class_idx}: {count} images")
+
+    # Print validation set statistics
+    print("\nValidation Set Statistics:")
+    print("-" * 50)
+    print(f"Total images: {len(val_dataset)}")
+    print("Images per class:")
+    for class_idx, count in val_dist.items():
+        print(f"Class {class_idx}: {count} images")
+
+    # Plot class distributions
+    plt.figure(figsize=(15, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.bar(train_dist.keys(), train_dist.values())
+    plt.title('Training Set Class Distribution')
+    plt.xlabel('Class')
+    plt.ylabel('Number of Images')
+
+    plt.subplot(1, 2, 2)
+    plt.bar(val_dist.keys(), val_dist.values())
+    plt.title('Validation Set Class Distribution')
+    plt.xlabel('Class')
+    plt.ylabel('Number of Images')
+
+    plt.tight_layout()
+    plt.show()
+
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
+
 ## TRAINING AND TESTING DATA
 # Create Dataset instances based on the predetermined splits in the dataset that use the flag is_train for training data
 train_dataset = BiasedCarsDataset(root_dir, att_dict_path, transform=data_transforms['train'], is_train=True)
@@ -208,8 +262,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     for epoch in range(num_epochs): # loop over training epochs
         model.train()  # Set model to training mode
         running_loss = 0.0 # counter for loss function
-
-        # I wonder why we don't use batches here? I guess because we were told to train on all the data?
 
         for batch_idx, (inputs, labels) in enumerate(train_loader):
             inputs, labels = inputs.to(device), labels.to(device)
